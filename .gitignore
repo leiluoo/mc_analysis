@@ -1,0 +1,14 @@
+# Paper PDF
+*.pdf
+
+# Generated training data
+datagen/data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+
+# macOS
+.DS_Store
