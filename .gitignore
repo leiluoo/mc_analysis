@@ -1,6 +1,9 @@
 # Paper PDF
 *.pdf
 
+# Raw persona source file (16GB, not committed)
+Elite Personas*.jsonl
+
 # Generated training data
 datagen/data/
 
