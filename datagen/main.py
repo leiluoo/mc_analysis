@@ -17,11 +17,14 @@ from tqdm import tqdm
 from config import TOPICS
 from pipeline import DataPipeline
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)-7s  %(message)s",
-    datefmt="%H:%M:%S",
-)
+class _TqdmHandler(logging.StreamHandler):
+    """Route all log output through tqdm.write so the progress bar stays put."""
+    def emit(self, record):
+        tqdm.write(self.format(record))
+
+_handler = _TqdmHandler()
+_handler.setFormatter(logging.Formatter("%(asctime)s  %(levelname)-7s  %(message)s", datefmt="%H:%M:%S"))
+logging.basicConfig(level=logging.INFO, handlers=[_handler])
 
 
 def load_personas(path: str) -> list[str]:
@@ -112,7 +115,20 @@ def main() -> None:
     print(f"Workers    : {args.workers}")
     print(f"Models     : planner={args.planner_model}  responder={args.responder_model}  judge={args.judge_model}\n")
 
-    bar = tqdm(total=args.n, unit="ex", dynamic_ncols=True)
+    existing = 0
+    output_path = Path(args.output)
+    if output_path.exists():
+        with open(output_path, encoding="utf-8") as f:
+            existing = sum(1 for line in f if line.strip())
+        print(f"Found {existing:,} existing records in {args.output}")
+
+    to_generate = max(0, args.n - existing)
+    if to_generate == 0:
+        print(f"Already have {existing:,} records, target {args.n:,} reached. Nothing to do.")
+        return
+
+    print(f"Generating {to_generate:,} more to reach target {args.n:,} ...\n")
+    bar = tqdm(total=args.n, initial=existing, unit="ex", dynamic_ncols=True)
 
     def on_done(example):
         if example is not None:
@@ -126,7 +142,7 @@ def main() -> None:
             bar.set_postfix_str("ERROR", refresh=False)
         bar.update(1)
 
-    stats = pipeline.generate_batch(args.n, args.output, workers=args.workers, on_done=on_done)
+    stats = pipeline.generate_batch(to_generate, args.output, workers=args.workers, on_done=on_done)
     bar.close()
 
     print(f"\n{'='*50}")
