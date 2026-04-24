@@ -136,9 +136,13 @@ class DataPipeline:
         responses = responder.respond(prompt)  # list[str], length = num_rollouts
 
         # 5. Evaluate each rollout with the judge (parallelised when G > 1)
-        # ReliableVersionedEditing rubrics reference specific earlier document
-        # versions — the judge needs the conversation history to see them.
-        judge_conv = conversation if category == "ReliableVersionedEditing" else None
+        # Categories that require conversation history for correct judgement:
+        # - ReliableVersionedEditing: rubric references earlier document versions
+        # - SelfCoherence: rubric checks consistency with prior model responses;
+        #   the final response alone looks self-consistent even when it contradicts
+        #   something the model said several turns earlier.
+        NEEDS_HISTORY = {"ReliableVersionedEditing", "SelfCoherence"}
+        judge_conv = conversation if category in NEEDS_HISTORY else None
 
         def _eval(response: str) -> Rollout:
             reward, reasoning = judge.evaluate(rubric_q, response, conversation=judge_conv)
