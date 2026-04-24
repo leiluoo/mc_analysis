@@ -136,8 +136,12 @@ class DataPipeline:
         responses = responder.respond(prompt)  # list[str], length = num_rollouts
 
         # 5. Evaluate each rollout with the judge (parallelised when G > 1)
+        # ReliableVersionedEditing rubrics reference specific earlier document
+        # versions — the judge needs the conversation history to see them.
+        judge_conv = conversation if category == "ReliableVersionedEditing" else None
+
         def _eval(response: str) -> Rollout:
-            reward, reasoning = judge.evaluate(rubric_q, response)
+            reward, reasoning = judge.evaluate(rubric_q, response, conversation=judge_conv)
             return Rollout(response=response, reward=reward, reasoning=reasoning)
 
         with ThreadPoolExecutor(max_workers=len(responses)) as pool:
