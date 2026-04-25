@@ -32,43 +32,31 @@ Usage:
 """
 import argparse
 import json
+import sys
 from pathlib import Path
 
 from tqdm import tqdm
 
+sys.path.insert(0, str(Path(__file__).parent.parent / "datagen"))
+from judge import NEEDS_HISTORY, _build_judge_prompt
+
 # ---------------------------------------------------------------------------
-# Reward evaluator source code embedded in meta
-# Uses ''' outer quotes so the inner f""" triple quotes don't conflict.
+# check_following is static; apply_template is built per-record in build_meta
+# so the history and rubric are pre-filled — only {answer} stays as a runtime
+# placeholder.  This makes the RL reward prompt identical to judge.py's.
 # ---------------------------------------------------------------------------
-
-_APPLY_TEMPLATE_EXEC = '''\
-def apply_template(prompt, answer, rubric):
-    template = f"""
-You are tasked with evaluating a model response to see if it meets a specific criteria.
-The criteria will always be YES/NO evaluation.
-
-The model response is as follows:
-<MODEL_RESPONSE>
-{answer}
-</MODEL_RESPONSE>
-
-The criteria that the model response must meet is as follows. Be VERY STRICT!:
-<CRITERIA>
-{rubric}
-</CRITERIA>
-
-Print your reasoning followed by your verdict, either "YES" or "NO"."""
-    return template'''
 
 _CHECK_FOLLOWING_EXEC = '''\
 def check_following(instruction, model_answer):
     try:
-        if 'YES' in model_answer:
-            return True
-        else:
-            return False
+        import json
+        parsed = json.loads(model_answer)
+        return parsed.get('answer', '').lower().startswith('yes')
     except:
         return False'''
+
+# Sentinel used to locate where {answer} goes when splitting a rendered prompt
+_SENTINEL = "\x00ANSWER\x00"
 
 
 # ---------------------------------------------------------------------------
@@ -84,7 +72,28 @@ def apply_chat_template(messages: list[dict]) -> str:
     return "".join(parts)
 
 
-def build_meta(rubric_question: str) -> str:
+def _build_apply_template_exec(rubric_question: str, prompt_messages: list[dict], category: str) -> str:
+    """Build a per-record apply_template function with history and rubric pre-filled.
+
+    Uses _build_judge_prompt with a sentinel to split the prompt into a prefix
+    and suffix; only {answer} remains as a runtime placeholder.
+    """
+    conversation = prompt_messages[:-1] if category in NEEDS_HISTORY else None
+    full = _build_judge_prompt(rubric_question, _SENTINEL, conversation)
+    # Split on the sentinel's rendered section to isolate prefix and suffix
+    sentinel_block = f'[Model Response]\n"""\n{_SENTINEL}\n"""'
+    pre, post = full.split(sentinel_block)
+
+    # repr() safely escapes newlines and quotes for embedding as string literals
+    return (
+        "def apply_template(prompt, answer, rubric):\n"
+        f"    pre = {repr(pre)}\n"
+        f"    post = {repr(post)}\n"
+        "    return pre + f'[Model Response]\\n\"\"\"\\n{answer}\\n\"\"\"' + post"
+    )
+
+
+def build_meta(rubric_question: str, prompt_messages: list[dict], category: str) -> str:
     """Serialise the reward evaluator config as a JSON string."""
     meta = {
         "tag": {
@@ -96,7 +105,7 @@ def build_meta(rubric_question: str) -> str:
                             "evaluation": [
                                 {
                                     "type": "llm",
-                                    "exec": _APPLY_TEMPLATE_EXEC,
+                                    "exec": _build_apply_template_exec(rubric_question, prompt_messages, category),
                                     "rubric": rubric_question,
                                 },
                                 {
@@ -122,7 +131,7 @@ def convert(record: dict) -> dict:
     return {
         "system": "",
         "prompt": apply_chat_template(record["prompt"]),
-        "meta":   build_meta(record["rubric_question"]),
+        "meta":   build_meta(record["rubric_question"], record["prompt"], record.get("challenge_category", "")),
     }
 
 

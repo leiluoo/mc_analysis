@@ -17,9 +17,25 @@ from openai import OpenAI
 #   SelfCoherence            — must verify consistency with prior model claims in history
 NEEDS_HISTORY = {"ReliableVersionedEditing", "SelfCoherence"}
 
-_JUDGE_SYSTEM = "You are a precise, unbiased evaluator. Answer the rubric question strictly based on the provided content."
 
-_CONV_HEADER = "Conversation history (for context only — the document versions are in the assistant turns):"
+def _build_judge_prompt(rubric_question: str, response: str, conversation: Optional[list[dict]]) -> str:
+    """Assemble the judge prompt. Shared by RubricJudge and to_train.py."""
+    parts: list[str] = [
+        "You are a precise, unbiased evaluator. "
+        "Your task is to assess whether a model response satisfies the given evaluation criterion."
+    ]
+
+    if conversation:
+        turns = "\n".join(f"[{m['role'].upper()}]: {m['content']}" for m in conversation)
+        parts.append(f"[Conversation History]\n{turns}")
+
+    parts.append(f'[Model Response]\n"""\n{response}\n"""')
+    parts.append(
+        f"[Evaluation Criterion]\n{rubric_question}\n\n"
+        'Answer "yes" or "no" based on the model response above.\n'
+        'Return JSON: {"answer": "yes" or "no", "reasoning": "one concise sentence"}'
+    )
+    return "\n\n".join(parts)
 
 
 class RubricJudge:
@@ -37,33 +53,16 @@ class RubricJudge:
         Evaluate a model response using a binary rubric question.
 
         Args:
-            conversation: Pass the full conversation history for
-                          ReliableVersionedEditing so the judge can see what
-                          the referenced earlier document versions looked like.
-                          Leave None for all other categories.
+            conversation: Conversation history for NEEDS_HISTORY categories;
+                          leave None for all other categories.
         Returns:
             (reward, reasoning)  —  reward = 1 if rubric passes, else 0.
         """
-        parts: list[str] = []
-
-        if conversation:
-            turns = "\n".join(
-                f"[{m['role'].upper()}]: {m['content']}" for m in conversation
-            )
-            parts.append(f"{_CONV_HEADER}\n{turns}")
-
-        parts.append(f'AI response to evaluate:\n"""\n{response}\n"""')
-        parts.append(
-            f'Rubric question: {rubric_question}\n\n'
-            'Answer "yes" or "no" based on the response above (use conversation history only to understand version references).\n'
-            'Return JSON: {"answer": "yes" or "no", "reasoning": "one concise sentence"}'
-        )
 
         result = self.client.chat.completions.create(
             model=self.model,
             messages=[
-                {"role": "system", "content": _JUDGE_SYSTEM},
-                {"role": "user", "content": "\n\n".join(parts)},
+                {"role": "user", "content": _build_judge_prompt(rubric_question, response, conversation)},
             ],
             response_format={"type": "json_object"},
             temperature=0.0,
