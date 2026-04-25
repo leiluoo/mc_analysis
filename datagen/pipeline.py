@@ -210,12 +210,13 @@ class DataPipeline:
                             f.write(json.dumps(asdict(example), ensure_ascii=False) + "\n")
                             f.flush()
                             stats["total"] += 1
-                            stats["pass" if example.reward == 1 else "fail"] += 1
+                            n_pass = sum(r["reward"] for r in example.rollouts)
+                            stats["pass" if n_pass > 0 else "fail"] += 1
                         logger.info(
-                            "[%s] reward=%d | %s",
+                            "[%s] pass=%d/%d",
                             example.challenge_category,
-                            example.reward,
-                            example.judge_reasoning[:60],
+                            n_pass,
+                            len(example.rollouts),
                         )
                         if on_done:
                             on_done(example)

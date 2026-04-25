@@ -12,6 +12,11 @@ from typing import Optional
 from openai import OpenAI
 
 
+# Categories whose rubric cannot be answered from the final response alone:
+#   ReliableVersionedEditing — rubric references a specific earlier document version
+#   SelfCoherence            — must verify consistency with prior model claims in history
+NEEDS_HISTORY = {"ReliableVersionedEditing", "SelfCoherence"}
+
 _JUDGE_SYSTEM = "You are a precise, unbiased evaluator. Answer the rubric question strictly based on the provided content."
 
 _CONV_HEADER = "Conversation history (for context only — the document versions are in the assistant turns):"
