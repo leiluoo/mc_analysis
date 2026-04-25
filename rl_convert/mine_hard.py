@@ -22,39 +22,81 @@ Usage:
 import argparse
 import json
 import logging
-import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Optional
 
-from tqdm import tqdm
-
-# Reuse judge from datagen
-sys.path.insert(0, str(Path(__file__).parent.parent / "datagen"))
-from judge import NEEDS_HISTORY, RubricJudge
 from openai import OpenAI
+from tqdm import tqdm
 
 logging.basicConfig(level=logging.WARNING)  # suppress info during progress bar
 
+# Categories whose rubric cannot be answered from the final response alone:
+#   ReliableVersionedEditing — rubric references a specific earlier document version
+#   SelfCoherence            — must verify consistency with prior model claims in history
+NEEDS_HISTORY = {"ReliableVersionedEditing", "SelfCoherence"}
 
-def judge_record(record: dict, judge: RubricJudge) -> list[bool]:
+
+# ---------------------------------------------------------------------------
+# Judge (self-contained, no datagen dependency)
+# ---------------------------------------------------------------------------
+
+def _build_judge_prompt(rubric_question: str, response: str, conversation: Optional[list[dict]]) -> str:
+    parts: list[str] = [
+        "You are a precise, unbiased evaluator. "
+        "Your task is to assess whether a model response satisfies the given evaluation criterion."
+    ]
+    if conversation:
+        turns = "\n".join(f"[{m['role'].upper()}]: {m['content']}" for m in conversation)
+        parts.append(f"[Conversation History]\n{turns}")
+    parts.append(f'[Model Response]\n"""\n{response}\n"""')
+    parts.append(
+        f"[Evaluation Criterion]\n{rubric_question}\n\n"
+        'Answer "yes" or "no" based on the model response above.\n'
+        'Return JSON: {"answer": "yes" or "no", "reasoning": "one concise sentence"}'
+    )
+    return "\n\n".join(parts)
+
+
+def judge_response(
+    client: OpenAI,
+    model: str,
+    rubric_question: str,
+    response: str,
+    conversation: Optional[list[dict]] = None,
+) -> bool:
+    result = client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": _build_judge_prompt(rubric_question, response, conversation)}],
+        response_format={"type": "json_object"},
+        temperature=0.0,
+    ).choices[0].message.content or ""
+    parsed = json.loads(result)
+    return parsed.get("answer", "").lower().startswith("yes")
+
+
+# ---------------------------------------------------------------------------
+# Per-record judging
+# ---------------------------------------------------------------------------
+
+def judge_record(record: dict, client: OpenAI, model: str) -> list[bool]:
     """Judge every response in record["responses"], return bool list."""
-    rubric_q   = record["rubric_question"]
-    responses  = record.get("responses", [])
-    category   = record.get("challenge_category", "")
+    rubric_q  = record["rubric_question"]
+    responses = record.get("responses", [])
+    category  = record.get("challenge_category", "")
 
-    # For categories that need conversation history, strip the final user turn.
     conversation = None
     if category in NEEDS_HISTORY:
         prompt = record.get("prompt", [])
-        conversation = prompt[:-1]   # everything before the final user turn
+        conversation = prompt[:-1]  # everything before the final user turn
 
-    results: list[bool] = []
-    for resp in responses:
-        reward, _ = judge.evaluate(rubric_q, resp, conversation=conversation)
-        results.append(reward == 1)
-    return results
+    return [judge_response(client, model, rubric_q, resp, conversation) for resp in responses]
 
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -72,7 +114,7 @@ def main() -> None:
     client_kw = {"api_key": args.api_key}
     if args.base_url:
         client_kw["base_url"] = args.base_url
-    judge = RubricJudge(OpenAI(**client_kw), model=args.judge_model)
+    client = OpenAI(**client_kw)
 
     records = [json.loads(l) for l in Path(args.input).read_text().splitlines() if l.strip()]
     print(f"Loaded {len(records):,} records from {args.input}")
@@ -86,7 +128,7 @@ def main() -> None:
     bar = tqdm(total=len(records), unit="rec", dynamic_ncols=True)
 
     def _process(record: dict) -> dict:
-        results = judge_record(record, judge)
+        results = judge_record(record, client, args.judge_model)
         return {**record, "results": results}
 
     with open(out_path, "w", encoding="utf-8") as f:
